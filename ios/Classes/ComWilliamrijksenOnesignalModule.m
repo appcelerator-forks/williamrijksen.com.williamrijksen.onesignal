@@ -6,6 +6,8 @@
  */
 
 #import "ComWilliamrijksenOnesignalModule.h"
+#import "OneSignalModuleHelper.h"
+#import <OneSignal/OneSignal.h>
 #import "TiBase.h"
 #import "TiHost.h"
 #import "TiUtils.h"
@@ -13,97 +15,141 @@
 
 @implementation ComWilliamrijksenOnesignalModule
 
+NSString * const NotificationReceived = @"notificationReceived";
+NSString * const NotificationOpened = @"notificationOpened";
+
 #pragma mark Internal
 
 // this is generated for your module, please do not change it
--(id)moduleGUID
+- (id)moduleGUID
 {
 	return @"67065763-fd5e-4069-a877-6c7fd328f877";
 }
 
 // this is generated for your module, please do not change it
--(NSString*)moduleId
+- (NSString*)moduleId
 {
 	return @"com.williamrijksen.onesignal";
 }
 
 #pragma mark Lifecycle
 
-- (void) receivedHandler:(OSNotification *)notification {
-    OSNotificationPayload* payload = notification.payload;
-        
-    NSString* title = @"";
-    NSString* body = @"";
-    NSDictionary* additionalData = [[NSDictionary alloc] init];
-
-    if(payload.title) {
-        title = payload.title;
-    }
-
-    if (payload.body) {
-        body = [payload.body copy];
-    }
-
-    if (payload.additionalData) {
-        additionalData = payload.additionalData;
-    }
-
-    NSDictionary* notificationData = @{
-                                        @"title": title,
-                                        @"body": body,
-                                        @"additionalData": additionalData
-                                        };
-    [self fireEvent:@"notificationReceived" withObject:notificationData];
-};
-    
-- (void) actionHandler:(OSNotificationOpenedResult *)result {
-    OSNotificationPayload* payload = result.notification.payload;
-
-    NSString* title = @"";
-    NSString* body = @"";
-    NSDictionary* additionalData = [[NSDictionary alloc] init];
-
-    if(payload.title) {
-        title = payload.title;
-    }
-
-    if (payload.body) {
-        body = [payload.body copy];
-    }
-
-    if (payload.additionalData) {
-        additionalData = payload.additionalData;
-    }
-
-    NSDictionary* notificationData = @{
-                                       @"title": title,
-                                       @"body": body,
-                                       @"additionalData": additionalData};
-    [self fireEvent:@"notificationOpened" withObject:notificationData];
+- (void)_configure
+{
+    NSLog(@"[DEBUG] com.williamrijksen.onesignal configure");
+    [super _configure];
+    [[TiApp app] registerApplicationDelegate:self];
 }
 
-- (void)startup
+#pragma mark - UIApplicationDelegate
+
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
-    [super startup];
-    [[TiApp app] setRemoteNotificationDelegate:self];
+    NSLog(@"[DEBUG] com.williamrijksen.onesignal didFinishLaunchingWithOptions");
+
+    id notificationReceivedBlock = ^(OSNotification *notification) {
+        OSNotificationPayload* payload = notification.payload;
+        NSLog(@"[DEBUG] com.williamrijksen.onesignal notification received %@", payload);
+        [self fireEvent:NotificationReceived withObject:[OneSignalModuleHelper toDictionary:payload]];
+    };
+
+    id notificationOpenedBlock = ^(OSNotificationOpenedResult *result) {
+        OSNotificationPayload* payload = result.notification.payload;
+        NSLog(@"[DEBUG] com.williamrijksen.onesignal notification opened %@", payload);
+        [self fireEvent:NotificationOpened withObject:[OneSignalModuleHelper toDictionary:payload]];
+    };
+
+    id onesignalInitSettings = @{
+        kOSSettingsKeyAutoPrompt : @false
+    };
 
     NSString *OneSignalAppID = [[TiApp tiAppProperties] objectForKey:@"OneSignal_AppID"];
-	[OneSignal initWithLaunchOptions:[[TiApp app] launchOptions]
+    [OneSignal initWithLaunchOptions:launchOptions
                                appId:OneSignalAppID
-          handleNotificationReceived:^(OSNotification *notification) {
-              [self receivedHandler:notification];
-          }
-            handleNotificationAction:^(OSNotificationOpenedResult *result) {
-                [self actionHandler:result];
-            }
-                            settings:@{
-                 kOSSettingsKeyInFocusDisplayOption: @(OSNotificationDisplayTypeNone),
-                 kOSSettingsKeyAutoPrompt: @YES}
-     ];
-	//TODO these settings should be configurable from the Titanium App on module initialization
+          handleNotificationReceived:notificationReceivedBlock
+            handleNotificationAction:notificationOpenedBlock
+                            settings:onesignalInitSettings];
+    [OneSignal setLocationShared:YES];
+    OneSignal.inFocusDisplayType = OSNotificationDisplayTypeNone;
+    return YES;
+}
+
+#pragma mark - Listernes
+
+- (void)_listenerAdded:(NSString*)type count:(int)count
+{
+    if (count == 1 && [type isEqual:NotificationOpened]) {
+        NSDictionary *initialNotificationPayload = [TiApp.app.launchOptions objectForKey:UIApplicationLaunchOptionsRemoteNotificationKey];
+        OSNotificationPayload *oneSignalPayload = [OSNotificationPayload parseWithApns:initialNotificationPayload];
+        NSLog(@"[DEBUG] com.williamrijksen.onesignal FIRE cold boot NotificationOpened");
+        [self fireEvent:NotificationOpened withObject:[OneSignalModuleHelper toDictionary:oneSignalPayload]];
+    }
 }
 
 #pragma mark Public API's
+
+- (bool)retrieveSubscribed:(id)args
+{
+    return [OneSignal getPermissionSubscriptionState].subscriptionStatus.subscribed;
+}
+
+- (NSString *)retrievePlayerId:(id)args
+{
+    return [OneSignal getPermissionSubscriptionState].subscriptionStatus.userId;
+}
+
+- (NSString *)retrieveToken:(id)args
+{
+    return [OneSignal getPermissionSubscriptionState].subscriptionStatus.pushToken;
+}
+
+- (void)promptForPushNotificationsWithUserResponse:(id)args
+{
+    ENSURE_UI_THREAD(promptForPushNotificationsWithUserResponse, args);
+    ENSURE_SINGLE_ARG(args, KrollCallback);
+
+    if([args isKindOfClass:[KrollCallback class]]) {
+        [self replaceValue:args forKey:@"callback" notification:NO];
+    }
+
+    [OneSignal promptForPushNotificationsWithUserResponse:^(BOOL accepted) {
+        NSLog(@"[DEBUG] com.williamrijksen.onesignal User accepted notifications: %d", accepted);
+        if ([args isKindOfClass:[KrollCallback class]]) {
+            NSDictionary* event = @{
+                @"accepted": NUMBOOL(accepted)
+            };
+            [self fireCallback:@"callback" withArg:event withSource:self];
+        }
+    }];
+}
+
+- (void)setSubscription:(id)arguments
+{
+    id args = arguments;
+    ENSURE_UI_THREAD_1_ARG(args);
+    ENSURE_SINGLE_ARG(args, NSNumber);
+    [OneSignal setSubscription:[TiUtils boolValue:args]];
+}
+
+- (void)setExternalUserId:(id)arguments
+{
+    id args = arguments;
+    ENSURE_UI_THREAD_1_ARG(args);
+    ENSURE_SINGLE_ARG(args, NSString);
+    
+    [OneSignal setExternalUserId:[TiUtils stringValue:args] withCompletion:^(NSDictionary *results) {
+        NSLog(@"Set external user id update complete with results: %@", results.description);
+    }];
+}
+
+- (void)removeExternalUserId:(id)arguments
+{
+    id args = arguments;
+    ENSURE_UI_THREAD_1_ARG(args); // not necessary but app was crashing without it
+    [OneSignal removeExternalUserId:^(NSDictionary *results) {
+        NSLog(@"Remove external user id  complete with results: %@", results.description);
+    }];
+}
 
 - (void)sendTag:(id)arguments
 {
@@ -158,21 +204,14 @@
     }];
 }
 
-- (void)idsAvailable:(id)args
+- (NSDictionary *)getPermissionSubscriptionState:(id)args
 {
+    // Maybe it should use OSDevice class instead in the future
 	id value = args;
-    ENSURE_UI_THREAD(idsAvailable, value);
-    ENSURE_SINGLE_ARG(value, KrollCallback);
+    ENSURE_UI_THREAD(getPermissionSubscriptionState, value);
 
-	[OneSignal IdsAvailable:^(NSString* userId, NSString* pushToken) {
-		NSMutableDictionary *idsDict = [NSMutableDictionary dictionaryWithDictionary:@{
-			@"userId" : userId ?: @[],
-         	@"pushToken" :pushToken ?: @[]
-     	}];
-		NSArray *invocationArray = [[NSArray alloc] initWithObjects:&idsDict count:1];
-        [value call:invocationArray thisObject:self];
-        [invocationArray release];
-	}];
+    OSPermissionSubscriptionState* state = [OneSignal getPermissionSubscriptionState];
+    return [state toDictionary];
 }
 
 - (void)postNotification:(id)arguments
